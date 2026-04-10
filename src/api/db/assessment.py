@@ -231,7 +231,8 @@ def _to_richtext_blocks(text: str) -> List[Dict[str, Any]]:
 def _assessment_item_to_quiz_question(item: Dict[str, Any]) -> Dict[str, Any]:
     stem = str(item.get("stem") or "")
     item_id = str(item.get("item_id") or "")
-    item_type = str(item.get("type") or "mcq")
+    item_type = str(item.get("type") or "mcq").strip().lower()
+    item_question_type = str(item.get("question_type") or "").strip().lower()
     options = item.get("options") or []
     answer_key = str(item.get("answer_key") or "")
 
@@ -241,13 +242,17 @@ def _assessment_item_to_quiz_question(item: Dict[str, Any]) -> Dict[str, Any]:
         if matching:
             answer_text = matching[0]
 
+    is_coding_question = item_type in {"coding", "code"} or item_question_type in {"coding", "code"}
+
     question_type = "objective" if item_type == "mcq" else "subjective"
+    input_type = "code" if is_coding_question else "text"
+    coding_languages = ["python"] if is_coding_question else None
 
     return {
         "blocks": _to_richtext_blocks(stem),
         "answer": _to_richtext_blocks(answer_text) if answer_text else None,
         "type": question_type,
-        "input_type": "text",
+        "input_type": input_type,
         "response_type": "chat",
         "context": {
             "source": "assessment_engine",
@@ -255,7 +260,7 @@ def _assessment_item_to_quiz_question(item: Dict[str, Any]) -> Dict[str, Any]:
             "skill_tags": item.get("skill_tags", []),
             "difficulty": item.get("difficulty"),
         },
-        "coding_languages": None,
+        "coding_languages": coding_languages,
         "scorecard_id": None,
         "title": item_id or "Assessment Question",
         "settings": {
