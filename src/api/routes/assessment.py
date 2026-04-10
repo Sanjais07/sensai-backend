@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from api.assessment_engine import (
     apply_review_actions,
     build_coverage_report,
+    extract_jd_title,
     extract_jd_topics,
     generate_assessment,
 )
@@ -188,9 +189,11 @@ async def extract_jd_topics_endpoint(
         raise HTTPException(status_code=400, detail="Unable to extract text from the uploaded file")
 
     topics = extract_jd_topics(jd_title=jd_title, jd_text=extracted_text, max_topics=1)
+    extracted_title = extract_jd_title(jd_text=extracted_text, fallback_title=jd_title or "Role Assessment")
 
     return {
         "topics": topics[:1],
+        "jd_title": extracted_title,
         "text_length": len(extracted_text),
         "extracted_text": extracted_text,
     }

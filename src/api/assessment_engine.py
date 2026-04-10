@@ -323,6 +323,75 @@ def extract_jd_topics(jd_title: str, jd_text: str, max_topics: int = 2) -> List[
     return fallback_topics or ["Problem Solving", "Communication"][:max_topics]
 
 
+def extract_jd_title(jd_text: str, fallback_title: str = "Role Assessment") -> str:
+    """Extract a concise JD title from text using OpenAI with deterministic fallback."""
+    api_key = os.getenv("OPENAI_API_KEY")
+
+    if api_key:
+        try:
+            client = openai.OpenAI(api_key=api_key)
+            prompt = (
+                "Extract the most likely job title from this job description. "
+                "Return only strict JSON in this schema: "
+                '{"title": "..."}. '
+                "Keep title concise (2-6 words), no department suffixes, no location.\n\n"
+                f"JD:\n{jd_text[:12000]}"
+            )
+
+            response = client.chat.completions.create(
+                model="gpt-4.1-2025-04-14",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You extract concise role titles and always return valid JSON.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=80,
+            )
+
+            content = (response.choices[0].message.content or "").strip()
+            try:
+                parsed = json.loads(content)
+            except json.JSONDecodeError:
+                match = re.search(r"\{.*\}", content, re.DOTALL)
+                parsed = json.loads(match.group()) if match else {}
+
+            title = parsed.get("title", "") if isinstance(parsed, dict) else ""
+            if isinstance(title, str) and title.strip():
+                return title.strip()[:80]
+        except Exception:
+            logger.exception("JD title extraction via OpenAI failed; using fallback extraction")
+
+    # Fallback 1: explicit markers commonly used in JDs
+    patterns = [
+        r"(?im)^\s*job\s*title\s*[:\-]\s*(.+)$",
+        r"(?im)^\s*role\s*[:\-]\s*(.+)$",
+        r"(?im)^\s*position\s*[:\-]\s*(.+)$",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, jd_text)
+        if match:
+            candidate = match.group(1).strip()
+            if candidate:
+                return candidate[:80]
+
+    # Fallback 2: use the first meaningful line
+    lines = [line.strip() for line in jd_text.splitlines() if line.strip()]
+    for line in lines[:8]:
+        # Skip noisy headings
+        if len(line) < 2:
+            continue
+        if line.lower() in {"job description", "about the role", "responsibilities", "requirements"}:
+            continue
+        if len(line.split()) <= 8:
+            return line[:80]
+
+    return fallback_title
+
+
 def build_blueprint(payload: Dict[str, Any]) -> Blueprint:
     mode: Literal["curriculum", "jd"] = payload["mode"]
     level = str(payload.get("target_level", "intermediate")).lower()
