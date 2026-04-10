@@ -458,7 +458,7 @@ async def get_cohort_analytics_metrics_for_tasks(
                 INNER JOIN {tasks_table_name} t
                     ON ch.task_id = t.id
                 WHERE ch.deleted_at IS NULL AND t.deleted_at IS NULL
-                GROUP BY cl.id, cl.email, ch.task_id, t.name
+                GROUP BY cl.id, cl.email, ch.task_id
             )
             SELECT
                 user_id,
@@ -494,7 +494,7 @@ async def get_cohort_analytics_metrics_for_tasks(
                 INNER JOIN {tasks_table_name} t
                     ON ch.task_id = t.id
                 WHERE ch.deleted_at IS NULL AND t.deleted_at IS NULL
-                GROUP BY cl.id, cl.email, ch.task_id, t.name
+                GROUP BY cl.id, cl.email, ch.task_id
             )
             SELECT
                 user_id,
@@ -572,7 +572,7 @@ async def get_cohort_attempt_data_for_tasks(
                 INNER JOIN {tasks_table_name} t
                     ON ch.task_id = t.id
                 WHERE ch.deleted_at IS NULL AND t.deleted_at IS NULL
-                GROUP BY cl.id, cl.email, ch.task_id, t.name
+                GROUP BY cl.id, cl.email, ch.task_id
             )
             SELECT 
                 user_id,
@@ -608,7 +608,7 @@ async def get_cohort_attempt_data_for_tasks(
                 INNER JOIN {tasks_table_name} t
                     ON ch.task_id = t.id
                 WHERE ch.deleted_at IS NULL AND t.deleted_at IS NULL
-                GROUP BY cl.id, cl.email, ch.task_id, t.name
+                GROUP BY cl.id, cl.email, ch.task_id
             )
             SELECT 
                 user_id,
