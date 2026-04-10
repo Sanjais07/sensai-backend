@@ -16,6 +16,7 @@ from api.routes import (
     code,
     cohort,
     course,
+    insights,
     org,
     task,
     chat,
@@ -102,9 +103,25 @@ async def log_requests(request: Request, call_next):
 
 
 # Add CORS middleware to allow cross-origin requests (for frontend to access backend)
+configured_cors_origins = os.getenv("CORS_ALLOW_ORIGINS", "")
+cors_origins = [
+    origin.strip()
+    for origin in configured_cors_origins.split(",")
+    if origin.strip()
+]
+
+# Safe local defaults for development when env var is not set.
+if not cors_origins:
+    cors_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Replace with your frontend URL in production
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -132,6 +149,7 @@ app.include_router(milestone.router, prefix="/milestones", tags=["milestones"])
 app.include_router(scorecard.router, prefix="/scorecards", tags=["scorecards"])
 app.include_router(code.router, prefix="/code", tags=["code"])
 app.include_router(hva.router, prefix="/hva", tags=["hva"])
+app.include_router(insights.router, prefix="/insights", tags=["insights"])
 app.include_router(websocket_router, prefix="/ws", tags=["websockets"])
 app.include_router(integration.router, prefix="/integrations", tags=["integrations"])
 
