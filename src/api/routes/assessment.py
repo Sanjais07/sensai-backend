@@ -1,11 +1,16 @@
+from io import BytesIO
 from typing import Any, Dict, List, Literal, Optional
+import importlib
+import zipfile
+import xml.etree.ElementTree as ET
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from api.assessment_engine import (
     apply_review_actions,
     build_coverage_report,
+    extract_jd_topics,
     generate_assessment,
 )
 from api.db.assessment import (
@@ -92,6 +97,49 @@ class SaveReviewRequest(BaseModel):
     review_actions: List[Dict[str, Any]]
     coverage_report: Dict[str, Any]
     course_id: Optional[int] = None
+    course_ids: Optional[List[int]] = None
+
+
+def _extract_text_from_docx_bytes(content: bytes) -> str:
+    with zipfile.ZipFile(BytesIO(content)) as archive:
+        try:
+            xml_data = archive.read("word/document.xml")
+        except KeyError:
+            return ""
+
+    root = ET.fromstring(xml_data)
+    texts = []
+    for node in root.iter():
+        if node.tag.endswith("}t") and node.text:
+            texts.append(node.text)
+    return " ".join(texts)
+
+
+def _extract_text_from_upload(filename: str, content_type: str, content: bytes) -> str:
+    lower_name = (filename or "").lower()
+    lower_type = (content_type or "").lower()
+
+    is_pdf = lower_name.endswith(".pdf") or "pdf" in lower_type
+    is_docx = lower_name.endswith(".docx") or (
+        "wordprocessingml.document" in lower_type
+    )
+    is_doc = lower_name.endswith(".doc") or "msword" in lower_type
+
+    if is_pdf:
+        pypdf_module = importlib.import_module("pypdf")
+        pdf_reader = getattr(pypdf_module, "PdfReader")
+        reader = pdf_reader(BytesIO(content))
+        page_text = [page.extract_text() or "" for page in reader.pages]
+        return "\n".join(page_text).strip()
+
+    if is_docx:
+        return _extract_text_from_docx_bytes(content).strip()
+
+    if is_doc:
+        # Legacy .doc is binary; this best-effort decode extracts any plain text fragments.
+        return content.decode("latin-1", errors="ignore").strip()
+
+    raise HTTPException(status_code=400, detail="Only PDF or Word files are supported")
 
 
 @router.post("/generate", response_model=AssessmentGenerateResponse)
@@ -119,6 +167,32 @@ async def generate_assessment_endpoint(payload: AssessmentGenerateRequest):
     return {
         "assessment": assessment,
         "coverage_report": coverage_report,
+    }
+
+
+@router.post("/jd-topics")
+async def extract_jd_topics_endpoint(
+    file: UploadFile = File(...),
+    jd_title: str = Form("Role Assessment"),
+):
+    """Extract text from uploaded JD file and return one topic."""
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File size exceeds 20MB")
+
+    extracted_text = _extract_text_from_upload(file.filename or "", file.content_type or "", content)
+    if not extracted_text.strip():
+        raise HTTPException(status_code=400, detail="Unable to extract text from the uploaded file")
+
+    topics = extract_jd_topics(jd_title=jd_title, jd_text=extracted_text, max_topics=1)
+
+    return {
+        "topics": topics[:1],
+        "text_length": len(extracted_text),
+        "extracted_text": extracted_text,
     }
 
 
@@ -208,18 +282,29 @@ async def save_assessment_review_endpoint(assessment_id: int, payload: SaveRevie
         coverage_report=payload.coverage_report,
     )
 
-    created_task_id: Optional[int] = None
+    created_task_ids: List[int] = []
+    requested_course_ids: List[int] = []
+    if payload.course_ids:
+        requested_course_ids.extend(payload.course_ids)
     if payload.course_id:
+        requested_course_ids.append(payload.course_id)
+
+    unique_course_ids = list(dict.fromkeys([cid for cid in requested_course_ids if cid]))
+
+    for course_id in unique_course_ids:
         created_task_id = await create_assessment_task_in_course(
-            course_id=payload.course_id,
+            course_id=course_id,
             assessment_title=assessment.get("title", "Generated Assessment"),
             assessment_json=assessment.get("assessment_json", {}),
         )
+        if created_task_id:
+            created_task_ids.append(created_task_id)
     
     return {
         "review_id": review_id,
         "assessment_id": assessment_id,
-        "created_task_id": created_task_id,
+        "created_task_id": created_task_ids[0] if created_task_ids else None,
+        "created_task_ids": created_task_ids,
         "message": "Review saved successfully",
     }
 

@@ -252,6 +252,77 @@ def _extract_jd_skills(jd_title: str, jd_text: str, explicit_skills: Optional[Li
     return found or ["problem_solving", "communication"]
 
 
+def extract_jd_topics(jd_title: str, jd_text: str, max_topics: int = 2) -> List[str]:
+    """Extract up to max_topics from JD text using OpenAI with deterministic fallback."""
+    max_topics = max(1, min(max_topics, 5))
+    api_key = os.getenv("OPENAI_API_KEY")
+
+    if api_key:
+        try:
+            client = openai.OpenAI(api_key=api_key)
+            prompt = (
+                "Extract up to "
+                f"{max_topics} core technical/interview topics from this JD. "
+                "Return only strict JSON in this schema: "
+                '{"topics": ["topic 1", "topic 2"]}. '
+                "Keep each topic short (1-3 words) and remove duplicates.\n\n"
+                f"Title: {jd_title}\n\nJD:\n{jd_text[:12000]}"
+            )
+
+            response = client.chat.completions.create(
+                model="gpt-4.1-2025-04-14",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You extract concise interview topics and always return valid JSON.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+                max_tokens=180,
+            )
+
+            content = (response.choices[0].message.content or "").strip()
+            try:
+                parsed = json.loads(content)
+            except json.JSONDecodeError:
+                match = re.search(r"\{.*\}", content, re.DOTALL)
+                parsed = json.loads(match.group()) if match else {}
+
+            topics = parsed.get("topics", []) if isinstance(parsed, dict) else []
+            cleaned: List[str] = []
+            seen = set()
+            for topic in topics:
+                if not isinstance(topic, str):
+                    continue
+                t = topic.strip()
+                if not t:
+                    continue
+                key = t.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                cleaned.append(t)
+                if len(cleaned) >= max_topics:
+                    break
+
+            if cleaned:
+                return cleaned
+        except Exception:
+            logger.exception("JD topic extraction via OpenAI failed; using fallback extraction")
+
+    fallback = _extract_jd_skills(jd_title, jd_text)
+    fallback_topics: List[str] = []
+    for skill in fallback:
+        pretty = skill.replace("_", " ").strip().title()
+        if pretty and pretty.lower() not in [v.lower() for v in fallback_topics]:
+            fallback_topics.append(pretty)
+        if len(fallback_topics) >= max_topics:
+            break
+
+    return fallback_topics or ["Problem Solving", "Communication"][:max_topics]
+
+
 def build_blueprint(payload: Dict[str, Any]) -> Blueprint:
     mode: Literal["curriculum", "jd"] = payload["mode"]
     level = str(payload.get("target_level", "intermediate")).lower()
@@ -298,6 +369,16 @@ def _build_question_stem(mode: str, qtype: QuestionType, skill: str, context_tit
     return f"[{base_context}] Write a function or query to solve a {skill.replace('_', ' ')} task with clear complexity considerations. (Q{idx})"
 
 
+def _map_question_type(qtype: QuestionType) -> str:
+    if qtype == "mcq":
+        return "objective"
+    if qtype == "coding":
+        return "coding"
+    if qtype == "caselet":
+        return "caselet"
+    return "subjective"
+
+
 async def _build_item(
     item_id: str,
     mode: str,
@@ -323,7 +404,9 @@ async def _build_item(
     item: Dict[str, Any] = {
         "item_id": item_id,
         "type": qtype,
+        "question_type": _map_question_type(qtype),
         "difficulty": difficulty,
+        "difficulty_level": difficulty,
         "skill_tags": [skill],
         "module": module_name,
         "stem": llm_data.get("stem", _build_question_stem(mode, qtype, skill, context_title, module_name, idx)),
