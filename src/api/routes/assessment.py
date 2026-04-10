@@ -14,6 +14,7 @@ from api.db.assessment import (
     update_assessment,
     save_assessment_review,
     list_assessments,
+    create_assessment_task_in_course,
 )
 
 router = APIRouter()
@@ -90,6 +91,7 @@ class SaveReviewRequest(BaseModel):
     user_id: int
     review_actions: List[Dict[str, Any]]
     coverage_report: Dict[str, Any]
+    course_id: Optional[int] = None
 
 
 @router.post("/generate", response_model=AssessmentGenerateResponse)
@@ -205,10 +207,19 @@ async def save_assessment_review_endpoint(assessment_id: int, payload: SaveRevie
         review_actions=payload.review_actions,
         coverage_report=payload.coverage_report,
     )
+
+    created_task_id: Optional[int] = None
+    if payload.course_id:
+        created_task_id = await create_assessment_task_in_course(
+            course_id=payload.course_id,
+            assessment_title=assessment.get("title", "Generated Assessment"),
+            assessment_json=assessment.get("assessment_json", {}),
+        )
     
     return {
         "review_id": review_id,
         "assessment_id": assessment_id,
+        "created_task_id": created_task_id,
         "message": "Review saved successfully",
     }
 

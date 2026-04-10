@@ -1,8 +1,10 @@
 import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
-from api.config import assessments_table_name, assessment_reviews_table_name
+from api.config import assessments_table_name, assessment_reviews_table_name, course_milestones_table_name
 from api.utils.db import get_new_db_connection, execute_db_operation
+from api.db.task import create_draft_task_for_course, update_draft_quiz
+from api.models import TaskType, TaskStatus
 
 
 async def create_assessment(
@@ -213,3 +215,95 @@ async def list_assessments(
         })
     
     return assessments, total_count
+
+
+def _to_richtext_blocks(text: str) -> List[Dict[str, Any]]:
+    return [
+        {
+            "type": "paragraph",
+            "props": {},
+            "content": [{"type": "text", "text": text}],
+            "children": [],
+        }
+    ]
+
+
+def _assessment_item_to_quiz_question(item: Dict[str, Any]) -> Dict[str, Any]:
+    stem = str(item.get("stem") or "")
+    item_id = str(item.get("item_id") or "")
+    item_type = str(item.get("type") or "mcq")
+    options = item.get("options") or []
+    answer_key = str(item.get("answer_key") or "")
+
+    answer_text = answer_key
+    if options and answer_key:
+        matching = [option for option in options if option.strip().lower().startswith(answer_key.strip().lower())]
+        if matching:
+            answer_text = matching[0]
+
+    question_type = "objective" if item_type == "mcq" else "subjective"
+
+    return {
+        "blocks": _to_richtext_blocks(stem),
+        "answer": _to_richtext_blocks(answer_text) if answer_text else None,
+        "type": question_type,
+        "input_type": "text",
+        "response_type": "chat",
+        "context": {
+            "source": "assessment_engine",
+            "item_id": item_id,
+            "skill_tags": item.get("skill_tags", []),
+            "difficulty": item.get("difficulty"),
+        },
+        "coding_languages": None,
+        "scorecard_id": None,
+        "title": item_id or "Assessment Question",
+        "settings": {
+            "allowCopyPaste": True,
+            "generatedBy": "assessment_engine",
+            "options": options,
+            "questionType": question_type,
+        },
+        "max_attempts": None,
+        "is_feedback_shown": True,
+    }
+
+
+async def create_assessment_task_in_course(course_id: int, assessment_title: str, assessment_json: Dict[str, Any]) -> Optional[int]:
+    """Create a draft quiz task in the first module of a course for the saved assessment."""
+    milestone_row = await execute_db_operation(
+        f"""
+        SELECT milestone_id
+        FROM {course_milestones_table_name}
+        WHERE course_id = ? AND deleted_at IS NULL
+        ORDER BY ordering ASC
+        LIMIT 1
+        """,
+        (course_id,),
+        fetch_one=True,
+    )
+
+    if not milestone_row or milestone_row[0] is None:
+        return None
+
+    task_title = f"Assessment: {assessment_title}"
+    task_id, _ = await create_draft_task_for_course(
+        title=task_title,
+        type=str(TaskType.QUIZ),
+        course_id=course_id,
+        milestone_id=milestone_row[0],
+    )
+
+    items = assessment_json.get("items", []) if isinstance(assessment_json, dict) else []
+    questions = [_assessment_item_to_quiz_question(item) for item in items if isinstance(item, dict)]
+
+    if questions:
+        await update_draft_quiz(
+            task_id=task_id,
+            title=task_title,
+            questions=questions,
+            scheduled_publish_at=None,
+            status=TaskStatus.DRAFT,
+        )
+
+    return task_id
