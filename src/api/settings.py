@@ -10,11 +10,12 @@ env_path = join(root_dir, ".env.aws")
 
 env_file_path = join(root_dir, ".env")
 if os.path.exists(env_file_path):
-    load_dotenv(env_file_path)
+    load_dotenv(env_file_path, override=False)
 
 if os.path.exists(env_path):
     print(f"Loading environment variables from {env_path}")
-    load_dotenv(env_path)
+    # Ensure deployment-specific values override placeholder local defaults.
+    load_dotenv(env_path, override=True)
 
 
 class Settings(BaseSettings):

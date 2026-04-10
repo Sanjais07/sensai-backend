@@ -32,6 +32,8 @@ from api.config import (
     integrations_table_name,
     assignment_table_name,
     bq_sync_table_name,
+    assessments_table_name,
+    assessment_reviews_table_name,
 )
 from api.db.migration import run_migrations
 
@@ -332,6 +334,68 @@ async def create_bq_sync_table(cursor):
 
     await cursor.execute(
         f"""CREATE INDEX IF NOT EXISTS idx_bq_sync_started_at ON {bq_sync_table_name} (started_at)"""
+    )
+
+
+async def create_assessments_table(cursor):
+    await cursor.execute(
+        f"""CREATE TABLE IF NOT EXISTS {assessments_table_name} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_id INTEGER NOT NULL,
+                cohort_id INTEGER,
+                user_id INTEGER,
+                mode TEXT NOT NULL,
+                title TEXT NOT NULL,
+                assessment_json TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                deleted_at DATETIME,
+                FOREIGN KEY (org_id) REFERENCES {organizations_table_name}(id) ON DELETE CASCADE,
+                FOREIGN KEY (cohort_id) REFERENCES {cohorts_table_name}(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES {users_table_name}(id) ON DELETE CASCADE
+            )"""
+    )
+
+    await cursor.execute(
+        f"""CREATE INDEX IF NOT EXISTS idx_assessments_org_id ON {assessments_table_name} (org_id)"""
+    )
+    
+    await cursor.execute(
+        f"""CREATE INDEX IF NOT EXISTS idx_assessments_cohort_id ON {assessments_table_name} (cohort_id)"""
+    )
+    
+    await cursor.execute(
+        f"""CREATE INDEX IF NOT EXISTS idx_assessments_user_id ON {assessments_table_name} (user_id)"""
+    )
+    
+    await cursor.execute(
+        f"""CREATE INDEX IF NOT EXISTS idx_assessments_mode ON {assessments_table_name} (mode)"""
+    )
+
+
+async def create_assessment_reviews_table(cursor):
+    await cursor.execute(
+        f"""CREATE TABLE IF NOT EXISTS {assessment_reviews_table_name} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                assessment_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                review_actions TEXT,
+                coverage_report TEXT,
+                reviewed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                deleted_at DATETIME,
+                FOREIGN KEY (assessment_id) REFERENCES {assessments_table_name}(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES {users_table_name}(id) ON DELETE CASCADE
+            )"""
+    )
+
+    await cursor.execute(
+        f"""CREATE INDEX IF NOT EXISTS idx_assessment_reviews_assessment_id ON {assessment_reviews_table_name} (assessment_id)"""
+    )
+    
+    await cursor.execute(
+        f"""CREATE INDEX IF NOT EXISTS idx_assessment_reviews_user_id ON {assessment_reviews_table_name} (user_id)"""
     )
 
 
@@ -709,6 +773,10 @@ async def init_db():
             await create_assignment_table(cursor)
 
             await create_bq_sync_table(cursor)
+
+            await create_assessments_table(cursor)
+
+            await create_assessment_reviews_table(cursor)
 
             await conn.commit()
 

@@ -27,6 +27,8 @@ from api.config import (
     code_drafts_table_name,
     integrations_table_name,
     assignment_table_name,
+    assessments_table_name,
+    assessment_reviews_table_name,
 )
 
 
@@ -172,6 +174,20 @@ async def create_bq_sync_table_migration():
         await conn.commit()
 
 
+async def create_assessment_tables_migration():
+    """
+    Migration: Creates assessment tables if they don't exist.
+    """
+    async with get_new_db_connection() as conn:
+        cursor = await conn.cursor()
+        from api.db import create_assessments_table, create_assessment_reviews_table
+
+        await create_assessments_table(cursor)
+        await create_assessment_reviews_table(cursor)
+
+        await conn.commit()
+
+
 async def cleanup_invalid_chat_history():
     """
     Migration: Cleanup chat history records with empty or invalid AI responses for assignments.
@@ -232,4 +248,6 @@ async def cleanup_invalid_chat_history():
 
 
 async def run_migrations():
+    await create_bq_sync_table_migration()
+    await create_assessment_tables_migration()
     await cleanup_invalid_chat_history()

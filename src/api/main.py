@@ -9,8 +9,10 @@ from fastapi.responses import JSONResponse
 import os
 from os.path import exists
 from api.config import UPLOAD_FOLDER_NAME
+from api.db import init_db
 from api.utils.logging import logger
 from api.routes import (
+    assessment,
     auth,
     batch,
     code,
@@ -42,6 +44,9 @@ import sentry_sdk
 async def lifespan(app: FastAPI):
     # Initialize comprehensive logging as the very first step
     logger.info("Starting application")
+
+    # Ensure schema is up-to-date before serving requests.
+    await init_db()
 
     scheduler.start()
 
@@ -134,6 +139,7 @@ app.include_router(code.router, prefix="/code", tags=["code"])
 app.include_router(hva.router, prefix="/hva", tags=["hva"])
 app.include_router(websocket_router, prefix="/ws", tags=["websockets"])
 app.include_router(integration.router, prefix="/integrations", tags=["integrations"])
+app.include_router(assessment.router, prefix="/assessments", tags=["assessments"])
 
 
 @app.exception_handler(Exception)
