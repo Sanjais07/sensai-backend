@@ -52,6 +52,7 @@ class AssessmentGenerateRequest(BaseModel):
     type_distribution: Optional[Dict[Literal["mcq", "saq", "caselet", "coding"], int]] = None
     difficulty_distribution: Optional[Dict[Literal["easy", "medium", "hard"], float]] = None
     skill_weights: Optional[Dict[str, float]] = None
+    role_skill_map: Optional[Dict[str, List[str]]] = None
 
 
 class AssessmentGenerateResponse(BaseModel):

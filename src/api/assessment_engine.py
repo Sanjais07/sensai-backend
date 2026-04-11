@@ -236,11 +236,24 @@ def _difficulty_sequence(distribution: Dict[DifficultyLevel, float], total: int)
     return seq[:total]
 
 
-def _extract_jd_skills(jd_title: str, jd_text: str, explicit_skills: Optional[List[str]] = None) -> List[str]:
+def _extract_jd_skills(
+    jd_title: str,
+    jd_text: str,
+    explicit_skills: Optional[List[str]] = None,
+    custom_role_skill_map: Optional[Dict[str, List[str]]] = None,
+) -> List[str]:
     combined = f"{jd_title}\n{jd_text}".lower()
     found: List[str] = []
 
-    for canonical_skill, hints in DEFAULT_JD_SKILL_MAP.items():
+    effective_map = DEFAULT_JD_SKILL_MAP.copy()
+    if custom_role_skill_map:
+        for canonical_skill, hints in custom_role_skill_map.items():
+            normalized_key = _normalize_skill_name(canonical_skill)
+            normalized_hints = [str(hint).strip().lower() for hint in hints if str(hint).strip()]
+            if normalized_hints:
+                effective_map[normalized_key] = normalized_hints
+
+    for canonical_skill, hints in effective_map.items():
         if any(hint in combined for hint in hints):
             found.append(canonical_skill)
 
@@ -415,6 +428,7 @@ def build_blueprint(payload: Dict[str, Any]) -> Blueprint:
             jd_title=jd.get("title", ""),
             jd_text=jd.get("description", ""),
             explicit_skills=jd.get("skills", []),
+            custom_role_skill_map=payload.get("role_skill_map"),
         )
         skill_targets = _build_skill_targets(extracted_skills, payload.get("skill_weights"))
 
@@ -526,6 +540,59 @@ def _similarity(a: str, b: str) -> float:
     return len(ta & tb) / len(union)
 
 
+def _semantic_tokens(text: str) -> set[str]:
+    synonyms = {
+        "analyse": "analyze",
+        "analysis": "analyze",
+        "optimise": "optimize",
+        "optimization": "optimize",
+        "kpi": "metric",
+        "metrics": "metric",
+        "querying": "query",
+        "queries": "query",
+        "sql": "database",
+        "database": "database",
+        "scenario": "case",
+        "caselet": "case",
+        "problem": "challenge",
+        "problems": "challenge",
+        "stakeholder": "communication",
+        "presentation": "communication",
+        "roadmap": "planning",
+    }
+
+    base = _tokenize(text)
+    collapsed = {synonyms.get(token, token) for token in base}
+    return {token for token in collapsed if len(token) >= 3}
+
+
+def _semantic_similarity(a: str, b: str) -> float:
+    ta, tb = _semantic_tokens(a), _semantic_tokens(b)
+    union = ta | tb
+    if not union:
+        return 0.0
+    return len(ta & tb) / len(union)
+
+
+def _semantic_redundancy_pairs(items: List[Dict[str, Any]], threshold: float = 0.68) -> List[Dict[str, Any]]:
+    pairs: List[Dict[str, Any]] = []
+    for i in range(len(items)):
+        for j in range(i + 1, len(items)):
+            stem_i = items[i].get("stem", "")
+            stem_j = items[j].get("stem", "")
+            semantic_score = _semantic_similarity(stem_i, stem_j)
+            if semantic_score >= threshold:
+                lexical_score = _similarity(stem_i, stem_j)
+                pairs.append(
+                    {
+                        "pair": [items[i]["item_id"], items[j]["item_id"]],
+                        "semantic_score": round(semantic_score, 4),
+                        "lexical_score": round(lexical_score, 4),
+                    }
+                )
+    return pairs
+
+
 def _redundancy_pairs(items: List[Dict[str, Any]], threshold: float = 0.8) -> List[Tuple[str, str]]:
     pairs: List[Tuple[str, str]] = []
     for i in range(len(items)):
@@ -533,6 +600,211 @@ def _redundancy_pairs(items: List[Dict[str, Any]], threshold: float = 0.8) -> Li
             if _similarity(items[i].get("stem", ""), items[j].get("stem", "")) >= threshold:
                 pairs.append((items[i]["item_id"], items[j]["item_id"]))
     return pairs
+
+
+def _item_text_for_scoring(item: Dict[str, Any]) -> str:
+    parts: List[str] = [str(item.get("stem", ""))]
+    if isinstance(item.get("answer_guidelines"), list):
+        parts.extend([str(x) for x in item.get("answer_guidelines", [])])
+    if isinstance(item.get("options"), list):
+        parts.extend([str(x) for x in item.get("options", [])])
+    return " ".join(parts).strip()
+
+
+def _extract_keywords(text: str) -> set[str]:
+    stopwords = {
+        "the", "and", "for", "with", "from", "that", "this", "your", "have", "has", "are", "into", "using",
+        "need", "role", "job", "description", "about", "will", "their", "our", "you", "how", "what", "when",
+    }
+    tokens = _tokenize(text)
+    return {token for token in tokens if len(token) >= 3 and token not in stopwords}
+
+
+def _objective_alignment_report(assessment: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    objectives_by_module = assessment.get("learning_objectives_by_module") or {}
+    if not isinstance(objectives_by_module, dict) or not objectives_by_module:
+        return None
+
+    items = assessment.get("items", [])
+    per_item: List[Dict[str, Any]] = []
+    low_alignment_items: List[Dict[str, Any]] = []
+
+    module_scores: Dict[str, List[float]] = {}
+    total_score = 0.0
+
+    for item in items:
+        module_name = (item.get("module") or "").strip()
+        module_objectives = objectives_by_module.get(module_name, []) if module_name else []
+
+        if not module_objectives:
+            entry = {
+                "item_id": item.get("item_id"),
+                "module": module_name or None,
+                "score": 0.0,
+                "matched_objective": None,
+            }
+            per_item.append(entry)
+            low_alignment_items.append(entry)
+            continue
+
+        item_tokens = _extract_keywords(_item_text_for_scoring(item))
+        best_score = 0.0
+        best_objective: Optional[str] = None
+
+        for objective in module_objectives:
+            obj_tokens = _extract_keywords(str(objective))
+            if not obj_tokens:
+                continue
+            score = _safe_ratio(len(item_tokens & obj_tokens), len(obj_tokens))
+            if score > best_score:
+                best_score = score
+                best_objective = str(objective)
+
+        rounded_score = round(best_score, 4)
+        entry = {
+            "item_id": item.get("item_id"),
+            "module": module_name,
+            "score": rounded_score,
+            "matched_objective": best_objective,
+        }
+        per_item.append(entry)
+        total_score += best_score
+
+        if best_score < 0.2:
+            low_alignment_items.append(entry)
+
+        module_scores.setdefault(module_name or "General", []).append(best_score)
+
+    avg_score = round(_safe_ratio(int(total_score * 10000), len(items) * 10000), 4) if items else 0.0
+    per_module_average = {
+        module: round(sum(scores) / len(scores), 4) if scores else 0.0
+        for module, scores in module_scores.items()
+    }
+
+    return {
+        "average_score": avg_score,
+        "per_module_average": per_module_average,
+        "low_alignment_count": len(low_alignment_items),
+        "low_alignment_items": low_alignment_items,
+        "per_item": per_item,
+    }
+
+
+def _hiring_relevance_report(assessment: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if assessment.get("mode") != "jd":
+        return None
+
+    jd_context = assessment.get("jd_context") or {}
+    title = str(jd_context.get("title", assessment.get("title", "")))
+    jd_skills = [str(skill) for skill in jd_context.get("skills", []) if str(skill).strip()]
+    context_terms = set(jd_context.get("keywords", []))
+    context_terms |= _extract_keywords(title)
+
+    generic_patterns = [
+        "what is",
+        "define",
+        "explain concept",
+        "generic",
+        "best practice",
+        "in general",
+    ]
+
+    items = assessment.get("items", [])
+    flagged_items: List[Dict[str, Any]] = []
+    per_item: List[Dict[str, Any]] = []
+    total_score = 0.0
+
+    for item in items:
+        item_text = _item_text_for_scoring(item).lower()
+        item_terms = _extract_keywords(item_text)
+
+        tagged_skills = [str(skill) for skill in item.get("skill_tags", []) if str(skill).strip()]
+        effective_skills = tagged_skills or jd_skills
+
+        mentions_skill = any(
+            _normalize_skill_name(skill).replace("_", " ") in item_text or _normalize_skill_name(skill) in item_text
+            for skill in effective_skills
+        )
+
+        role_term_overlap = _safe_ratio(len(item_terms & context_terms), len(context_terms)) if context_terms else 0.0
+        generic_hit_count = sum(1 for pattern in generic_patterns if pattern in item_text)
+
+        score = 0.0
+        if mentions_skill:
+            score += 0.5
+        score += min(role_term_overlap * 0.5, 0.4)
+        if generic_hit_count > 0:
+            score -= min(0.1 * generic_hit_count, 0.3)
+
+        score = max(0.0, min(score, 1.0))
+        rounded_score = round(score, 4)
+        total_score += score
+
+        is_generic = rounded_score < 0.3 or (generic_hit_count >= 2 and not mentions_skill)
+        reason = None
+        if is_generic:
+            if not mentions_skill:
+                reason = "No explicit JD skill evidence"
+            elif role_term_overlap < 0.1:
+                reason = "Weak role-context grounding"
+            else:
+                reason = "Likely generic phrasing"
+
+        entry = {
+            "item_id": item.get("item_id"),
+            "score": rounded_score,
+            "is_generic_risk": is_generic,
+            "reason": reason,
+        }
+        per_item.append(entry)
+        if is_generic:
+            flagged_items.append(entry)
+
+    avg_score = round(_safe_ratio(int(total_score * 10000), len(items) * 10000), 4) if items else 0.0
+
+    return {
+        "average_score": avg_score,
+        "generic_risk_count": len(flagged_items),
+        "flagged_items": flagged_items,
+        "per_item": per_item,
+    }
+
+
+def _effectiveness_report(assessment: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    source = assessment.get("effectiveness_metrics") or assessment.get("attempt_analytics")
+    if not isinstance(source, dict):
+        return None
+
+    skill_gap_by_learner = source.get("skill_gap_by_learner") or source.get("learner_skill_gap") or []
+    item_pass_rates = source.get("item_pass_rates") or source.get("question_pass_rates") or []
+    time_spent_per_item = source.get("time_spent_per_item") or source.get("question_time_spent") or []
+    discrimination = source.get("discrimination") or source.get("question_discrimination") or {}
+
+    if not any([skill_gap_by_learner, item_pass_rates, time_spent_per_item, discrimination]):
+        return None
+
+    over_discriminating = []
+    under_discriminating = []
+    if isinstance(discrimination, dict):
+        over_discriminating = discrimination.get("over_discriminating") or discrimination.get("high_discrimination") or []
+        under_discriminating = discrimination.get("under_discriminating") or discrimination.get("low_discrimination") or []
+
+    summary = source.get("summary") or {}
+
+    return {
+        "summary": {
+            "attempt_count": summary.get("attempt_count"),
+            "candidate_count": summary.get("candidate_count"),
+            "learner_count": summary.get("learner_count"),
+        },
+        "skill_gap_by_learner": skill_gap_by_learner,
+        "item_pass_rates": item_pass_rates,
+        "time_spent_per_item": time_spent_per_item,
+        "discrimination": {
+            "over_discriminating": over_discriminating,
+            "under_discriminating": under_discriminating,
+        },
+    }
 
 
 async def generate_assessment(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -543,10 +815,16 @@ async def generate_assessment(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     context_title = ""
     module_rotation: List[Optional[str]] = []
+    learning_objectives_by_module: Dict[str, List[str]] = {}
     if blueprint.mode == "curriculum":
         curriculum = payload["curriculum"]
         context_title = curriculum.get("course", "Curriculum Assessment")
         modules = curriculum.get("modules", [])
+        learning_objectives_by_module = {
+            str(module.get("name", "")).strip(): [str(obj) for obj in module.get("learning_objectives", []) if str(obj).strip()]
+            for module in modules
+            if str(module.get("name", "")).strip()
+        }
         if modules:
             module_names = [m.get("name", "General") for m in modules]
             module_rotation = [module_names[i % len(module_names)] for i in range(total_questions)]
@@ -617,6 +895,21 @@ async def generate_assessment(payload: Dict[str, Any]) -> Dict[str, Any]:
         "items": unique_items,
     }
 
+    if learning_objectives_by_module:
+        assessment["learning_objectives_by_module"] = learning_objectives_by_module
+
+    if blueprint.mode == "jd":
+        jd = payload.get("jd", {})
+        jd_title = str(jd.get("title", context_title))
+        jd_description = str(jd.get("description", ""))
+        explicit_skills = [str(skill) for skill in jd.get("skills", []) if str(skill).strip()]
+        derived_keywords = list(_extract_keywords(f"{jd_title} {jd_description}"))[:40]
+        assessment["jd_context"] = {
+            "title": jd_title,
+            "skills": explicit_skills,
+            "keywords": derived_keywords,
+        }
+
     return assessment
 
 
@@ -647,6 +940,7 @@ def build_coverage_report(assessment: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     redundancy = _redundancy_pairs(items)
+    semantic_redundancy = _semantic_redundancy_pairs(items)
 
     accepted = sum(1 for item in items if item.get("review_status") == "accepted")
     rejected = sum(1 for item in items if item.get("review_status") == "rejected")
@@ -667,6 +961,8 @@ def build_coverage_report(assessment: Dict[str, Any]) -> Dict[str, Any]:
         "redundancy": {
             "duplicate_pair_count": len(redundancy),
             "duplicate_pairs": redundancy,
+            "semantic_duplicate_pair_count": len(semantic_redundancy),
+            "semantic_duplicate_pairs": semantic_redundancy,
         },
         "review_summary": {
             "accepted": accepted,
@@ -674,6 +970,18 @@ def build_coverage_report(assessment: Dict[str, Any]) -> Dict[str, Any]:
             "pending": total - accepted - rejected,
         },
     }
+
+    objective_alignment = _objective_alignment_report(assessment)
+    if objective_alignment is not None:
+        report["objective_alignment"] = objective_alignment
+
+    hiring_relevance = _hiring_relevance_report(assessment)
+    if hiring_relevance is not None:
+        report["hiring_relevance"] = hiring_relevance
+
+    effectiveness_report = _effectiveness_report(assessment)
+    if effectiveness_report is not None:
+        report["effectiveness_report"] = effectiveness_report
 
     return report
 
